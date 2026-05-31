@@ -115,7 +115,7 @@ def reply_keyboard():
         [KeyboardButton("🍽️ EAT"), KeyboardButton("🚬 SMOKE")],
         [KeyboardButton("🚻 TOILET"), KeyboardButton("🔙 BACK")],
         [KeyboardButton("📊 STATUS")]
-    ], resize_keyboard=True, persistent=True)
+    ], resize_keyboard=True)   # persistent dihapus
 
 # ============================================================
 # SETUP COMMANDS
@@ -123,18 +123,18 @@ def reply_keyboard():
 async def setup_bot_commands(application: Application):
     commands = [
         BotCommand("start", "Buka menu absensi"),
-        BotCommand("menu", "Tampilkan keyboard absensi"),
-        BotCommand("status", "Cek status absensi"),
+        BotCommand("menu", "Tampilkan keyboard"),
+        BotCommand("status", "Cek status"),
     ]
     await application.bot.set_my_commands(commands)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 # ============================================================
-# COMMAND HANDLERS
+# HANDLERS
 # ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🏢 **Sistem Absensi Hongshu**\n\nGunakan tombol besar di bawah:",
+        "🏢 **Sistem Absensi Hongshu**\n\nGunakan tombol di bawah ini:",
         reply_markup=reply_keyboard(),
         parse_mode="Markdown"
     )
@@ -172,8 +172,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif text == "📊 STATUS":
             await status(update, context)
     except Exception as e:
-        logger.error(f"Error di handle_message: {e}")
-        await update.message.reply_text("Terjadi kesalahan. Coba lagi.")
+        logger.error(f"Error: {e}")
+        await update.message.reply_text("❌ Terjadi kesalahan. Coba lagi.")
 
 # ============================================================
 # AKSI FUNCTIONS
@@ -182,7 +182,8 @@ async def aksi_start_work_message(update, user):
     sekarang = now()
     absensi = get_absensi_hari_ini(user.id)
     if absensi and absensi[5]:
-        await update.message.reply_text(header(user) + "⚠️ Sudah absen masuk hari ini!", reply_to_message_id=update.message.message_id)
+        await update.message.reply_text(header(user) + "⚠️ Sudah absen masuk hari ini!\n\n" + footer(), 
+                                      reply_to_message_id=update.message.message_id)
         return
 
     conn = get_conn()
@@ -197,7 +198,88 @@ async def aksi_start_work_message(update, user):
         reply_to_message_id=update.message.message_id
     )
 
-# ... (fungsi lain seperti off_work, aktivitas, back akan saya lengkapi kalau kamu minta full)
+async def aksi_off_work_message(update, user):
+    sekarang = now()
+    absensi = get_absensi_hari_ini(user.id)
+    if not absensi or not absensi[5]:
+        await update.message.reply_text(header(user) + "⚠️ Belum absen masuk hari ini!\n\n" + footer(), 
+                                      reply_to_message_id=update.message.message_id)
+        return
+    if absensi[6]:
+        await update.message.reply_text(header(user) + "⚠️ Sudah absen pulang hari ini!\n\n" + footer(), 
+                                      reply_to_message_id=update.message.message_id)
+        return
+
+    # Tutup aktivitas yang berjalan
+    aktif = get_aktivitas_berjalan(user.id)
+    conn = get_conn()
+    c = conn.cursor()
+    if aktif:
+        waktu_mulai = datetime.fromisoformat(aktif[4])
+        if waktu_mulai.tzinfo is None: waktu_mulai = TIMEZONE.localize(waktu_mulai)
+        durasi = (sekarang - waktu_mulai).total_seconds()
+        c.execute("UPDATE aktivitas SET waktu_selesai=?, durasi_detik=? WHERE id=?", 
+                  (sekarang.isoformat(), int(durasi), aktif[0]))
+
+    c.execute("UPDATE absensi SET off_work=? WHERE user_id=? AND tanggal=?", 
+              (sekarang.isoformat(), user.id, get_tanggal_hari_ini()))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(header(user) + f"✅ Absen pulang berhasil: {format_waktu(sekarang)}\n\n{footer()}", 
+                                  reply_to_message_id=update.message.message_id)
+
+async def aksi_aktivitas_message(update, user, jenis, label):
+    sekarang = now()
+    absensi = get_absensi_hari_ini(user.id)
+    if not absensi or not absensi[5]:
+        await update.message.reply_text(header(user) + "⚠️ Belum absen masuk!\n\n" + footer(), 
+                                      reply_to_message_id=update.message.message_id)
+        return
+    if absensi[6]:
+        await update.message.reply_text(header(user) + "⚠️ Sudah absen pulang!\n\n" + footer(), 
+                                      reply_to_message_id=update.message.message_id)
+        return
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO aktivitas (user_id, tanggal, jenis, waktu_mulai) VALUES (?,?,?,?)",
+              (user.id, get_tanggal_hari_ini(), jenis, sekarang.isoformat()))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        header(user) + f"✅ {label} dicatat: {format_waktu(sekarang)}\nTekan BACK setelah selesai.\n\n{footer()}",
+        reply_to_message_id=update.message.message_id
+    )
+
+async def aksi_back_message(update, user):
+    sekarang = now()
+    aktif = get_aktivitas_berjalan(user.id)
+    if not aktif:
+        await update.message.reply_text(header(user) + "⚠️ Tidak ada aktivitas yang berjalan.\n\n" + footer(), 
+                                      reply_to_message_id=update.message.message_id)
+        return
+
+    waktu_mulai = datetime.fromisoformat(aktif[4])
+    if waktu_mulai.tzinfo is None: waktu_mulai = TIMEZONE.localize(waktu_mulai)
+    durasi_detik = (sekarang - waktu_mulai).total_seconds()
+    jenis = aktif[3]
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE aktivitas SET waktu_selesai=?, durasi_detik=? WHERE id=?", 
+              (sekarang.isoformat(), int(durasi_detik), aktif[0]))
+    conn.commit()
+    conn.close()
+
+    label_map = {"EAT": "makan", "SMOKE": "merokok", "TOILET": "ke toilet"}
+    label = label_map.get(jenis, jenis.lower())
+
+    await update.message.reply_text(
+        header(user) + f"✅ Kembali ke kerja dari {label} - {format_waktu(sekarang)}\nDurasi: {format_durasi(durasi_detik)}\n\n{footer()}",
+        reply_to_message_id=update.message.message_id
+    )
 
 # ============================================================
 # MAIN
@@ -213,7 +295,7 @@ def main():
 
     app.post_init = setup_bot_commands
 
-    print("✅ Bot sedang berjalan...")
+    print("✅ Bot Absensi Hongshu berjalan...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
