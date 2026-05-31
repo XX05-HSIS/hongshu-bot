@@ -437,23 +437,27 @@ async def aksi_back_message(update, user):
 
 
 # ============================================================
-# MAIN
+# MAIN - VERSI YANG STABIL DI RAILWAY
 # ============================================================
-async def main():
+def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await setup_bot_commands(app)
+    # Setup Commands & Menu Button
+    async def post_init(application: Application):
+        await setup_bot_commands(application)
 
-    print("✅ Bot Absensi Hongshu berjalan...")
-    await app.run_polling(drop_pending_updates=True)
+    app.post_init = post_init
+
+    print("✅ Bot Absensi Hongshu berjalan di Railway...")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
