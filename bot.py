@@ -3,15 +3,16 @@ import sqlite3
 from datetime import datetime
 import pytz
 import os
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes
 )
 
 # ============================================================
-# KONFIGURASI
+# KONFIGURASI — EDIT BAGIAN INI
 # ============================================================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_TOKEN_BOT_KAMU")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_TOKEN_BOT_KAMU_DI_SINI")
 TIMEZONE = pytz.timezone("Asia/Jakarta")
 WORK_END_HOUR = 21
 WORK_END_MINUTE = 0
@@ -71,6 +72,8 @@ def now():
 def format_waktu(dt):
     if isinstance(dt, str):
         dt = datetime.fromisoformat(dt)
+        if dt.tzinfo is None:
+            dt = TIMEZONE.localize(dt)
     return dt.strftime("%d/%m %H:%M:%S")
 
 
@@ -177,30 +180,74 @@ def cek_pulang_lebih_awal():
     return False, 0
 
 
+def keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🟢 START WORK", callback_data="start_work"),
+            InlineKeyboardButton("🔴 OFF WORK", callback_data="off_work"),
+        ],
+        [
+            InlineKeyboardButton("🍽️ EAT", callback_data="eat"),
+            InlineKeyboardButton("🚬 SMOKE", callback_data="smoke"),
+        ],
+        [
+            InlineKeyboardButton("🚻 TOILET", callback_data="toilet"),
+            InlineKeyboardButton("🔙 BACK", callback_data="back"),
+        ],
+    ])
+
+
 # ============================================================
 # COMMAND HANDLERS
 # ============================================================
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🏢 *Sistem Absensi Hongshu*\n\n"
-        "Gunakan perintah berikut:\n"
-        "/start_work - Masuk kerja\n"
-        "/off_work - Pulang kerja\n"
-        "/eat - Makan\n"
-        "/smoke - Merokok\n"
-        "/toilet - Ke toilet\n"
-        "/back - Kembali ke tempat kerja\n",
+        "🏢 *Sistem Absensi Hongshu*\n\nSilakan pilih aktivitas:",
+        reply_markup=keyboard(),
         parse_mode="Markdown"
     )
 
 
-async def cmd_start_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📋 *Menu Absensi:*",
+        reply_markup=keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+# ============================================================
+# CALLBACK HANDLER
+# ============================================================
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    action = query.data
+
+    if action == "start_work":
+        await aksi_start_work(query, user)
+    elif action == "off_work":
+        await aksi_off_work(query, user)
+    elif action == "eat":
+        await aksi_aktivitas(query, user, "EAT", "Makan")
+    elif action == "smoke":
+        await aksi_aktivitas(query, user, "SMOKE", "Merokok")
+    elif action == "toilet":
+        await aksi_aktivitas(query, user, "TOILET", "Ke toilet")
+    elif action == "back":
+        await aksi_back(query, user)
+
+
+# ============================================================
+# AKSI START WORK
+# ============================================================
+async def aksi_start_work(query, user):
     sekarang = now()
     absensi = get_absensi_hari_ini(user.id)
 
     if absensi and absensi[5]:
-        await update.message.reply_text(
+        await query.message.reply_text(
             f"{header(user)}"
             f"⚠️ Kamu sudah absen masuk hari ini!\n"
             f"Waktu masuk: {format_waktu(absensi[5])}\n\n"
@@ -225,7 +272,7 @@ async def cmd_start_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(
+    await query.message.reply_text(
         f"{header(user)}"
         f"✅ Absensi berhasil: Masuk kerja - {format_waktu(sekarang)}\n\n"
         f"Pengingat: Jangan lupa melakukan absensi pulang kerja "
@@ -234,13 +281,15 @@ async def cmd_start_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def cmd_off_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
+# ============================================================
+# AKSI OFF WORK
+# ============================================================
+async def aksi_off_work(query, user):
     sekarang = now()
     absensi = get_absensi_hari_ini(user.id)
 
     if not absensi or not absensi[5]:
-        await update.message.reply_text(
+        await query.message.reply_text(
             f"{header(user)}"
             f"⚠️ Kamu belum absen masuk kerja hari ini!\n\n"
             f"{footer()}"
@@ -248,7 +297,7 @@ async def cmd_off_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if absensi[6]:
-        await update.message.reply_text(
+        await query.message.reply_text(
             f"{header(user)}"
             f"⚠️ Kamu sudah absen pulang hari ini!\n\n"
             f"{footer()}"
@@ -262,6 +311,8 @@ async def cmd_off_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     aktif = get_aktivitas_berjalan(user.id)
     if aktif:
         waktu_mulai = datetime.fromisoformat(aktif[4])
+        if waktu_mulai.tzinfo is None:
+            waktu_mulai = TIMEZONE.localize(waktu_mulai)
         durasi = (sekarang - waktu_mulai).total_seconds()
         c.execute(
             "UPDATE aktivitas SET waktu_selesai=?, durasi_detik=? WHERE id=?",
@@ -277,6 +328,8 @@ async def cmd_off_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Hitung durasi
     start_dt = datetime.fromisoformat(absensi[5])
+    if start_dt.tzinfo is None:
+        start_dt = TIMEZONE.localize(start_dt)
     total_detik = (sekarang - start_dt).total_seconds()
 
     _, total_aktivitas = hitung_aktivitas(user.id)
@@ -322,18 +375,28 @@ async def cmd_off_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     teks += footer()
-    await update.message.reply_text(teks)
+    await query.message.reply_text(teks)
 
 
-async def cmd_aktivitas(update: Update, context: ContextTypes.DEFAULT_TYPE, jenis, label):
-    user = update.message.from_user
+# ============================================================
+# AKSI EAT / SMOKE / TOILET
+# ============================================================
+async def aksi_aktivitas(query, user, jenis, label):
     sekarang = now()
     absensi = get_absensi_hari_ini(user.id)
 
     if not absensi or not absensi[5]:
-        await update.message.reply_text(
+        await query.message.reply_text(
             f"{header(user)}"
             f"⚠️ Kamu belum absen masuk kerja hari ini!\n\n"
+            f"{footer()}"
+        )
+        return
+
+    if absensi[6]:
+        await query.message.reply_text(
+            f"{header(user)}"
+            f"⚠️ Kamu sudah absen pulang. Tidak bisa mencatat aktivitas.\n\n"
             f"{footer()}"
         )
         return
@@ -342,10 +405,10 @@ async def cmd_aktivitas(update: Update, context: ContextTypes.DEFAULT_TYPE, jeni
     if aktif:
         label_map = {"EAT": "makan", "SMOKE": "merokok", "TOILET": "ke toilet"}
         jenis_aktif = label_map.get(aktif[3], aktif[3].lower())
-        await update.message.reply_text(
+        await query.message.reply_text(
             f"{header(user)}"
             f"⚠️ Kamu masih dalam aktivitas: *{jenis_aktif}*\n"
-            f"Ketik /back terlebih dahulu!\n\n"
+            f"Tekan tombol BACK terlebih dahulu!\n\n"
             f"{footer()}",
             parse_mode="Markdown"
         )
@@ -371,7 +434,7 @@ async def cmd_aktivitas(update: Update, context: ContextTypes.DEFAULT_TYPE, jeni
     }
     label_kali = label_display.get(jenis, label.lower())
 
-    await update.message.reply_text(
+    await query.message.reply_text(
         f"{header(user)}"
         f"✅ Absensi berhasil: {label} - {format_waktu(sekarang)}\n\n"
         f"Perhatian: Ini adalah kali ke-{kali_ini} Anda {label_kali} hari ini.\n\n"
@@ -382,25 +445,15 @@ async def cmd_aktivitas(update: Update, context: ContextTypes.DEFAULT_TYPE, jeni
     )
 
 
-async def cmd_eat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cmd_aktivitas(update, context, "EAT", "Makan")
-
-
-async def cmd_smoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cmd_aktivitas(update, context, "SMOKE", "Merokok")
-
-
-async def cmd_toilet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cmd_aktivitas(update, context, "TOILET", "Ke toilet")
-
-
-async def cmd_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
+# ============================================================
+# AKSI BACK
+# ============================================================
+async def aksi_back(query, user):
     sekarang = now()
     aktif = get_aktivitas_berjalan(user.id)
 
     if not aktif:
-        await update.message.reply_text(
+        await query.message.reply_text(
             f"{header(user)}"
             f"⚠️ Tidak ada aktivitas yang sedang berjalan.\n\n"
             f"{footer()}"
@@ -408,6 +461,8 @@ async def cmd_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     waktu_mulai = datetime.fromisoformat(aktif[4])
+    if waktu_mulai.tzinfo is None:
+        waktu_mulai = TIMEZONE.localize(waktu_mulai)
     durasi_detik = (sekarang - waktu_mulai).total_seconds()
     jenis = aktif[3]
 
@@ -426,7 +481,7 @@ async def cmd_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jumlah, total_jenis = hitung_aktivitas(user.id, jenis)
     _, total_semua = hitung_aktivitas(user.id)
 
-    await update.message.reply_text(
+    await query.message.reply_text(
         f"{header(user)}"
         f"✅ {format_waktu(sekarang)} – Absensi kembali ke tempat kerja berhasil: "
         f"Dari aktivitas {label}\n\n"
@@ -438,20 +493,13 @@ async def cmd_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ============================================================
-# MAIN
-# ============================================================
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("start_work", cmd_start_work))
-    app.add_handler(CommandHandler("off_work", cmd_off_work))
-    app.add_handler(CommandHandler("eat", cmd_eat))
-    app.add_handler(CommandHandler("smoke", cmd_smoke))
-    app.add_handler(CommandHandler("toilet", cmd_toilet))
-    app.add_handler(CommandHandler("back", cmd_back))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CallbackQueryHandler(handle_callback))
 
     print("✅ Bot berjalan...")
     app.run_polling(drop_pending_updates=True)
