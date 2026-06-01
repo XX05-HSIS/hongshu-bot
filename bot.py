@@ -1,18 +1,21 @@
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, time, timedelta
 import pytz
 import os
+import calendar
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, BotCommand, MenuButtonCommands
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
+    Application, CommandHandler, MessageHandler, ContextTypes, filters, JobQueue
 )
 
 # ============================================================
 # KONFIGURASI — EDIT BAGIAN INI
 # ============================================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_TOKEN_BOT_KAMU_DI_SINI")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", None)   # ← WAJIB DIISI CHAT ID KAMU
 TIMEZONE = pytz.timezone("Asia/Jakarta")
+WORK_START_HOUR = 8      # Jam mulai kerja standar
 WORK_END_HOUR = 21
 WORK_END_MINUTE = 0
 # ============================================================
@@ -59,7 +62,7 @@ def get_conn():
     return sqlite3.connect("absensi.db")
 
 # ============================================================
-# HELPER (sama seperti asli)
+# HELPER
 # ============================================================
 def now():
     return datetime.now(TIMEZONE)
@@ -108,7 +111,18 @@ def get_tanggal_hari_ini():
 def get_absensi_hari_ini(user_id):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM absensi WHERE user_id=? AND tanggal=?", (user_id, get_tanggal_hari_ini()))
+    c.execute("SELECT * FROM absensi WHERE user_id=? AND tanggal=?", 
+              (user_id, get_tanggal_hari_ini()))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def get_absensi_kemarin(user_id):
+    kemarin = (now().date() - timedelta(days=1)).strftime("%Y-%m-%d")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM absensi WHERE user_id=? AND tanggal=? AND off_work IS NULL", 
+              (user_id, kemarin))
     row = c.fetchone()
     conn.close()
     return row
@@ -152,18 +166,120 @@ def hitung_aktivitas(user_id, jenis=None):
 
 def cek_pulang_lebih_awal():
     sekarang = now()
-    jadwal = sekarang.replace(
-        hour=WORK_END_HOUR,
-        minute=WORK_END_MINUTE,
-        second=0,
-        microsecond=0
-    )
+    jadwal = sekarang.replace(hour=WORK_END_HOUR, minute=WORK_END_MINUTE, second=0, microsecond=0)
     if sekarang < jadwal:
         return True, (jadwal - sekarang).total_seconds()
     return False, 0
 
 # ============================================================
-# REPLY KEYBOARD (Tombol Besar)
+# LAPORAN HARIAN (00:00)
+# ============================================================
+async def daily_report(context: ContextTypes.DEFAULT_TYPE):
+    if not ADMIN_CHAT_ID:
+        return
+    tanggal = (now().date() - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT user_id, full_name, start_work, off_work FROM absensi WHERE tanggal=? ORDER BY full_name", (tanggal,))
+    rows = c.fetchall()
+
+    if not rows:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, 
+                                     text=f"📊 *Laporan Harian {tanggal}*\n\nTidak ada data absensi.", 
+                                     parse_mode="Markdown")
+        conn.close()
+        return
+
+    teks = f"📊 *LAPORAN HARIAN*\nTanggal: {tanggal}\n\n"
+    for row in rows:
+        user_id, full_name, start_work, off_work = row
+        start_dt = TIMEZONE.localize(datetime.fromisoformat(start_work))
+        
+        if off_work:
+            end_dt = TIMEZONE.localize(datetime.fromisoformat(off_work))
+            total_detik = (end_dt - start_dt).total_seconds()
+            pulang_text = format_waktu(end_dt)
+        else:
+            total_detik = (now() - start_dt).total_seconds()
+            pulang_text = "BELUM PULANG ⚠️"
+
+        c.execute("SELECT jenis, COUNT(*) FROM aktivitas WHERE user_id=? AND tanggal=? AND waktu_selesai IS NOT NULL GROUP BY jenis", 
+                  (user_id, tanggal))
+        aktivitas = dict(c.fetchall())
+
+        keterangan = []
+        if start_dt.hour >= WORK_START_HOUR + 1:
+            keterangan.append("TELAT")
+        if off_work and (end_dt.hour < WORK_END_HOUR):
+            keterangan.append("PULANG AWAL")
+
+        teks += f"👤 *{full_name}*\n"
+        teks += f"   Masuk : {format_waktu(start_dt)}\n"
+        teks += f"   Pulang: {pulang_text}\n"
+        teks += f"   Kerja : {format_durasi(total_detik)}\n"
+        teks += f"   Eat: {aktivitas.get('EAT',0)} | Smoke: {aktivitas.get('SMOKE',0)} | Toilet: {aktivitas.get('TOILET',0)}\n"
+        teks += f"   Ket  : {' | '.join(keterangan) if keterangan else 'Normal'}\n\n"
+
+    teks += footer()
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=teks, parse_mode="Markdown")
+    conn.close()
+
+# ============================================================
+# LAPORAN BULANAN (tgl 30/31 jam 00:00)
+# ============================================================
+async def monthly_report(context: ContextTypes.DEFAULT_TYPE):
+    if not ADMIN_CHAT_ID:
+        return
+
+    today = now().date()
+    if today.day not in [30, 31]:
+        return
+
+    year = today.year
+    month = today.month
+    bulan_nama = today.strftime("%B %Y")
+
+    conn = get_conn()
+    c = conn.cursor()
+
+    start_month = f"{year}-{month:02d}-01"
+    end_month = f"{year}-{month:02d}-{calendar.monthrange(year, month)[1]}"
+
+    teks = f"📈 *LAPORAN BULANAN*\nBulan: {bulan_nama}\n\n"
+
+    # Ringkasan per minggu
+    c.execute("SELECT DISTINCT tanggal FROM absensi WHERE tanggal BETWEEN ? AND ? ORDER BY tanggal", (start_month, end_month))
+    dates = [row[0] for row in c.fetchall()]
+
+    week_num = 1
+    for i in range(0, len(dates), 7):
+        week_dates = dates[i:i+7]
+        if not week_dates:
+            break
+        teks += f"📅 *Minggu {week_num}* ({week_dates[0]} s/d {week_dates[-1]})\n"
+        for tgl in week_dates:
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM absensi WHERE tanggal=?", (tgl,))
+            hadir = c.fetchone()[0]
+            teks += f"   {tgl}: {hadir} orang\n"
+        teks += "\n"
+        week_num += 1
+
+    # Total Bulanan
+    c.execute("SELECT COUNT(DISTINCT user_id), COUNT(*) FROM absensi WHERE tanggal BETWEEN ? AND ?", (start_month, end_month))
+    total_user, total_record = c.fetchone()
+
+    teks += f"📊 *TOTAL BULAN INI*\n"
+    teks += f"Total Hari Kerja: {len(dates)}\n"
+    teks += f"Total Karyawan Absen: {total_user}\n"
+    teks += f"Total Record Absensi: {total_record}\n\n"
+    teks += footer()
+
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=teks, parse_mode="Markdown")
+    conn.close()
+
+# ============================================================
+# REPLY KEYBOARD
 # ============================================================
 def reply_keyboard():
     return ReplyKeyboardMarkup([
@@ -174,7 +290,7 @@ def reply_keyboard():
     ], resize_keyboard=True)
 
 # ============================================================
-# SETUP MENU BUTTON
+# SETUP
 # ============================================================
 async def setup_bot_commands(application: Application):
     commands = [
@@ -225,7 +341,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status(update, context)
 
 # ============================================================
-# STATUS COMMAND
+# STATUS
 # ============================================================
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -239,17 +355,25 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   reply_to_message_id=update.message.message_id)
 
 # ============================================================
-# AKSI START WORK — DIPERBAIKI (BISA RESET JIKA BELUM PULANG)
+# START WORK (tanpa auto close)
 # ============================================================
 async def aksi_start_work_message(update, user):
     sekarang = now()
-    absensi = get_absensi_hari_ini(user.id)
+    absensi_hari_ini = get_absensi_hari_ini(user.id)
+    
+    absensi_kemarin = get_absensi_kemarin(user.id)
+    if absensi_kemarin:
+        await update.message.reply_text(
+            f"{header(user)}⚠️ Peringatan: Kamu belum absen PULANG kemarin!\n"
+            f"Silakan tekan OFF WORK jika ingin menutup absensi kemarin.\n\n",
+            reply_to_message_id=update.message.message_id
+        )
 
     conn = get_conn()
     c = conn.cursor()
 
-    if absensi:
-        if absensi[6]:  # Sudah ada off_work
+    if absensi_hari_ini:
+        if absensi_hari_ini[6]:
             await update.message.reply_text(
                 f"{header(user)}⚠️ Hari ini sudah selesai (sudah absen pulang).\n"
                 f"Tidak bisa mengubah waktu masuk lagi.\n\n{footer()}",
@@ -257,19 +381,17 @@ async def aksi_start_work_message(update, user):
             )
             conn.close()
             return
-        else:  # Belum pulang → Update waktu masuk (bisa reset)
+        else:
             c.execute("UPDATE absensi SET start_work=? WHERE user_id=? AND tanggal=?",
                       (sekarang.isoformat(), user.id, get_tanggal_hari_ini()))
             conn.commit()
             conn.close()
             await update.message.reply_text(
-                f"{header(user)}✅ Waktu masuk telah di-update menjadi: {format_waktu(sekarang)}\n"
-                f"(Absen masuk sebelumnya diganti)\n\n{footer()}",
+                f"{header(user)}✅ Waktu masuk hari ini di-update: {format_waktu(sekarang)}\n\n{footer()}",
                 reply_to_message_id=update.message.message_id
             )
             return
 
-    # Belum ada record sama sekali hari ini
     c.execute("""INSERT INTO absensi 
                  (user_id, username, full_name, tanggal, start_work, status)
                  VALUES (?, ?, ?, ?, ?, 'active')""",
@@ -279,19 +401,19 @@ async def aksi_start_work_message(update, user):
 
     await update.message.reply_text(
         f"{header(user)}✅ Absensi berhasil: Masuk kerja - {format_waktu(sekarang)}\n\n"
-        f"Pengingat: Jangan lupa melakukan absensi pulang kerja.\n"
+        f"Jangan lupa absen pulang nanti.\n"
         f"{footer()}",
         reply_to_message_id=update.message.message_id
     )
 
 # ============================================================
-# FUNGSI LAINNYA (TIDAK DIUBAH)
+# OFF WORK, AKTIVITAS, BACK (sama seperti asli)
 # ============================================================
 async def aksi_off_work_message(update, user):
     sekarang = now()
     absensi = get_absensi_hari_ini(user.id)
     if not absensi or not absensi[5]:
-        await update.message.reply_text(f"{header(user)}⚠️ Kamu belum absen masuk!\n\n{footer()}", 
+        await update.message.reply_text(f"{header(user)}⚠️ Kamu belum absen masuk hari ini!\n\n{footer()}", 
                                       reply_to_message_id=update.message.message_id)
         return
     if absensi[6]:
@@ -321,9 +443,6 @@ async def aksi_off_work_message(update, user):
     total_detik = (sekarang - start_dt).total_seconds()
     _, total_aktivitas = hitung_aktivitas(user.id)
     waktu_bersih = total_detik - total_aktivitas
-    jumlah_toilet, durasi_toilet = hitung_aktivitas(user.id, "TOILET")
-    jumlah_eat, durasi_eat = hitung_aktivitas(user.id, "EAT")
-    jumlah_smoke, durasi_smoke = hitung_aktivitas(user.id, "SMOKE")
     lebih_awal, selisih = cek_pulang_lebih_awal()
 
     teks = f"{header(user)}"
@@ -337,11 +456,11 @@ async def aksi_aktivitas_message(update, user, jenis, label):
     sekarang = now()
     absensi = get_absensi_hari_ini(user.id)
     if not absensi or not absensi[5]:
-        await update.message.reply_text(f"{header(user)}⚠️ Belum absen masuk!\n\n{footer()}", 
+        await update.message.reply_text(f"{header(user)}⚠️ Belum absen masuk hari ini!\n\n{footer()}", 
                                       reply_to_message_id=update.message.message_id)
         return
     if absensi[6]:
-        await update.message.reply_text(f"{header(user)}⚠️ Sudah pulang!\n\n{footer()}", 
+        await update.message.reply_text(f"{header(user)}⚠️ Sudah pulang hari ini!\n\n{footer()}", 
                                       reply_to_message_id=update.message.message_id)
         return
 
@@ -412,6 +531,13 @@ async def aksi_back_message(update, user):
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
+
+    if ADMIN_CHAT_ID:
+        app.job_queue.run_daily(daily_report, time(0, 0, 0))
+        app.job_queue.run_daily(monthly_report, time(0, 0, 0))
+        print(f"✅ Laporan harian & bulanan diatur ke ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
+    else:
+        print("⚠️ ADMIN_CHAT_ID belum diisi!")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
