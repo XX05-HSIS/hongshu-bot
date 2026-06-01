@@ -530,14 +530,18 @@ async def aksi_back_message(update, user):
 # ============================================================
 def main():
     init_db()
+    
+    # Build Application dengan JobQueue
     app = Application.builder().token(BOT_TOKEN).build()
 
     if ADMIN_CHAT_ID:
+        # Jadwal Laporan Harian jam 00:00
         app.job_queue.run_daily(daily_report, time(0, 0, 0))
+        # Jadwal Laporan Bulanan jam 00:00
         app.job_queue.run_daily(monthly_report, time(0, 0, 0))
         print(f"✅ Laporan harian & bulanan diatur ke ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
     else:
-        print("⚠️ ADMIN_CHAT_ID belum diisi!")
+        print("⚠️ ADMIN_CHAT_ID belum diisi! Laporan otomatis tidak akan berjalan.")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
