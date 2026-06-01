@@ -12,10 +12,10 @@ from telegram.ext import (
 # ============================================================
 # KONFIGURASI — EDIT BAGIAN INI
 # ============================================================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_TOKEN_BOT_KAMU_DI_SINI")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", None)   # ← WAJIB DIISI CHAT ID KAMU
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8663072880:AAHUBNkjv4Jrf7H2B3KCR-a98B1Qu4MhKxY")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "667121178")   # ← WAJIB DIISI CHAT ID KAMU
 TIMEZONE = pytz.timezone("Asia/Jakarta")
-WORK_START_HOUR = 8      # Jam mulai kerja standar
+WORK_START_HOUR = 12      # Jam mulai kerja standar
 WORK_END_HOUR = 21
 WORK_END_MINUTE = 0
 # ============================================================
@@ -526,7 +526,7 @@ async def aksi_back_message(update, user):
     )
 
 # ============================================================
-# MAIN
+# MAIN — DIPERBAIKI
 # ============================================================
 def main():
     init_db()
@@ -535,13 +535,17 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     if ADMIN_CHAT_ID:
-        # Jadwal Laporan Harian jam 00:00
-        app.job_queue.run_daily(daily_report, time(0, 0, 0))
-        # Jadwal Laporan Bulanan jam 00:00
-        app.job_queue.run_daily(monthly_report, time(0, 0, 0))
-        print(f"✅ Laporan harian & bulanan diatur ke ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
+        try:
+            admin_id = int(ADMIN_CHAT_ID)
+            # Jadwal Laporan Harian jam 00:00
+            app.job_queue.run_daily(daily_report, time(0, 0, 0))
+            # Jadwal Laporan Bulanan jam 00:00
+            app.job_queue.run_daily(monthly_report, time(0, 0, 0))
+            print(f"✅ Laporan harian & bulanan diatur ke ADMIN_CHAT_ID: {admin_id}")
+        except Exception as e:
+            print(f"❌ Gagal setup job queue: {e}")
     else:
-        print("⚠️ ADMIN_CHAT_ID belum diisi! Laporan otomatis tidak akan berjalan.")
+        print("⚠️ ADMIN_CHAT_ID belum diisi!")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
