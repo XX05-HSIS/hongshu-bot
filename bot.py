@@ -152,7 +152,12 @@ def hitung_aktivitas(user_id, jenis=None):
 
 def cek_pulang_lebih_awal():
     sekarang = now()
-    jadwal = sekarang.replace(hour=WORK_END_HOUR, minute=WORK_END_MINUTE, second=0, microsecond=0)
+    jadwal = sekarang.replace(
+        hour=WORK_END_HOUR,
+        minute=WORK_END_MINUTE,
+        second=0,
+        microsecond=0
+    )
     if sekarang < jadwal:
         return True, (jadwal - sekarang).total_seconds()
     return False, 0
@@ -198,7 +203,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============================================================
-# MESSAGE HANDLER (Untuk Tombol Reply Keyboard)
+# MESSAGE HANDLER
 # ============================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -234,21 +239,39 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   reply_to_message_id=update.message.message_id)
 
 # ============================================================
-# AKSI FUNCTIONS (Disesuaikan dengan Reply)
+# AKSI START WORK — DIPERBAIKI (BISA RESET JIKA BELUM PULANG)
 # ============================================================
 async def aksi_start_work_message(update, user):
     sekarang = now()
     absensi = get_absensi_hari_ini(user.id)
-    if absensi and absensi[5]:
-        await update.message.reply_text(
-            f"{header(user)}⚠️ Kamu sudah absen masuk hari ini!\nWaktu masuk: {format_waktu(absensi[5])}\n\n{footer()}",
-            reply_to_message_id=update.message.message_id
-        )
-        return
 
     conn = get_conn()
     c = conn.cursor()
-    c.execute("""INSERT INTO absensi (user_id, username, full_name, tanggal, start_work, status)
+
+    if absensi:
+        if absensi[6]:  # Sudah ada off_work
+            await update.message.reply_text(
+                f"{header(user)}⚠️ Hari ini sudah selesai (sudah absen pulang).\n"
+                f"Tidak bisa mengubah waktu masuk lagi.\n\n{footer()}",
+                reply_to_message_id=update.message.message_id
+            )
+            conn.close()
+            return
+        else:  # Belum pulang → Update waktu masuk (bisa reset)
+            c.execute("UPDATE absensi SET start_work=? WHERE user_id=? AND tanggal=?",
+                      (sekarang.isoformat(), user.id, get_tanggal_hari_ini()))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(
+                f"{header(user)}✅ Waktu masuk telah di-update menjadi: {format_waktu(sekarang)}\n"
+                f"(Absen masuk sebelumnya diganti)\n\n{footer()}",
+                reply_to_message_id=update.message.message_id
+            )
+            return
+
+    # Belum ada record sama sekali hari ini
+    c.execute("""INSERT INTO absensi 
+                 (user_id, username, full_name, tanggal, start_work, status)
                  VALUES (?, ?, ?, ?, ?, 'active')""",
               (user.id, user.username, get_display_name(user), get_tanggal_hari_ini(), sekarang.isoformat()))
     conn.commit()
@@ -256,10 +279,14 @@ async def aksi_start_work_message(update, user):
 
     await update.message.reply_text(
         f"{header(user)}✅ Absensi berhasil: Masuk kerja - {format_waktu(sekarang)}\n\n"
-        f"Pengingat: Jangan lupa absen pulang.\n{footer()}",
+        f"Pengingat: Jangan lupa melakukan absensi pulang kerja.\n"
+        f"{footer()}",
         reply_to_message_id=update.message.message_id
     )
 
+# ============================================================
+# FUNGSI LAINNYA (TIDAK DIUBAH)
+# ============================================================
 async def aksi_off_work_message(update, user):
     sekarang = now()
     absensi = get_absensi_hari_ini(user.id)
@@ -272,7 +299,6 @@ async def aksi_off_work_message(update, user):
                                       reply_to_message_id=update.message.message_id)
         return
 
-    # Logika off_work sama seperti asli kamu (saya copy full)
     conn = get_conn()
     c = conn.cursor()
     aktif = get_aktivitas_berjalan(user.id)
@@ -289,7 +315,6 @@ async def aksi_off_work_message(update, user):
     conn.commit()
     conn.close()
 
-    # Hitung durasi (sama seperti asli)
     start_dt = datetime.fromisoformat(absensi[5])
     if start_dt.tzinfo is None:
         start_dt = TIMEZONE.localize(start_dt)
@@ -330,7 +355,6 @@ async def aksi_aktivitas_message(update, user, jenis, label):
         )
         return
 
-    # Logika sisanya sama seperti asli kamu
     jumlah_hari_ini, _ = hitung_aktivitas(user.id, jenis)
     kali_ini = jumlah_hari_ini + 1
     conn = get_conn()
